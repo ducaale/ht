@@ -94,6 +94,10 @@ pub struct Cli {
     #[structopt(long = "default-scheme")]
     pub default_scheme: Option<String>,
 
+    /// Create, or reuse and update a session. By default, sessions are stored in ~/.config/ht/sessions/. Explicit sessions filenames are not supported.
+    #[structopt(long = "session", parse(try_from_str = validate_session_name))]
+    pub session: Option<String>,
+
     /// The request URL, preceded by an optional HTTP method.
     #[structopt(name = "[METHOD] URL")]
     raw_method_or_url: String,
@@ -193,6 +197,17 @@ impl From<&Option<Body>> for Method {
             None => Method::GET,
         }
     }
+}
+
+fn validate_session_name(s: &str) -> Result<String> {
+    if s.contains(std::path::is_separator) {
+        return Err(Error::with_description(
+            &format!("{:?} contains invalid character {:?} ", s, std::path::MAIN_SEPARATOR),
+            ErrorKind::InvalidValue,
+        ))
+    }
+
+    Ok(s.to_string())
 }
 
 arg_enum! {

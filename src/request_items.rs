@@ -1,9 +1,11 @@
 use anyhow::{anyhow, Result};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::multipart;
+use serde::{Deserialize, Serialize};
 
 use crate::utils::file_to_part;
 use crate::RequestItem;
+use crate::Session;
 
 pub struct RequestItems(Vec<RequestItem>);
 
@@ -12,6 +14,12 @@ pub enum Body {
     Form(Vec<(String, String)>),
     Multipart(multipart::Form),
     Raw(String),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Parameter {
+    pub name: String,
+    pub value: String,
 }
 
 impl RequestItems {
@@ -26,7 +34,10 @@ impl RequestItems {
             .count()
     }
 
-    pub fn headers(&self) -> Result<(HeaderMap<HeaderValue>, Vec<HeaderName>)> {
+    pub fn headers(
+        &self,
+        session: Option<&Session>,
+    ) -> Result<(HeaderMap<HeaderValue>, Vec<HeaderName>)> {
         let mut headers = HeaderMap::new();
         let mut headers_to_unset = vec![];
         for item in &self.0 {
@@ -43,7 +54,39 @@ impl RequestItems {
                 _ => {}
             }
         }
+        // handle session additional headers
+        if let Some(s) = session {
+            for h in &*s.headers {
+                let key = HeaderName::from_bytes(&h.name.as_bytes()).unwrap();
+                headers
+                    .entry(key)
+                    .or_insert(HeaderValue::from_str(&h.value).unwrap());
+            }
+        }
         Ok((headers, headers_to_unset))
+    }
+
+    pub fn export_headers(&self, session: Option<&Session>) -> Vec<Parameter> {
+        let mut headers = vec![];
+        let mut header_names_present = vec![];
+        for item in &self.0 {
+            if let RequestItem::HttpHeader(key, value) = item {
+                headers.push(Parameter {
+                    name: String::from(key),
+                    value: String::from(value),
+                });
+                header_names_present.push(String::from(key));
+            }
+        }
+        // handle session additional headers
+        if let Some(s) = session {
+            for h in &s.headers {
+                if !header_names_present.contains(&h.name) {
+                    headers.push(h.clone());
+                }
+            }
+        }
+        headers
     }
 
     pub fn query(&self) -> Vec<(&String, &String)> {

@@ -2,8 +2,10 @@ use anyhow::Result;
 use regex::Regex;
 
 use crate::AuthType;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
 pub enum Auth {
     Bearer(String),
     Basic(String, Option<String>),

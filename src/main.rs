@@ -14,6 +14,7 @@ mod printer;
 mod request_items;
 mod url;
 mod utils;
+mod session;
 
 use anyhow::{anyhow, Result};
 use auth::Auth;
@@ -25,6 +26,7 @@ use request_items::{Body, RequestItems};
 use reqwest::redirect::Policy;
 use url::Url;
 use utils::body_from_stdin;
+use session::Session;
 
 fn get_user_agent() -> &'static str {
     // Hard-coded user agent for the benefit of tests
@@ -43,7 +45,6 @@ async fn main() -> Result<()> {
 
     let request_items = RequestItems::new(args.request_items);
     let query = request_items.query();
-    let (headers, headers_to_unset) = request_items.headers()?;
     #[allow(clippy::eval_order_dependence)]
     let body = match (
         request_items.body(args.form, args.multipart).await?,
@@ -62,7 +63,34 @@ async fn main() -> Result<()> {
     let url = Url::new(args.url, args.default_scheme)?;
     let host = url.host().ok_or_else(|| anyhow!("Missing hostname"))?;
     let method = args.method.unwrap_or_else(|| Method::from(&body)).into();
-    let auth = Auth::new(args.auth, args.auth_type, &host)?;
+    let mut auth = Auth::new(args.auth, args.auth_type, &host)?;
+
+    // load previous session if present
+    let previous_session = match args.session {
+        None => None,
+        Some(ref identifier) => {
+            match Session::load(identifier, &host) {
+                Err(why) => panic!("couldn't load session {}: {}", &identifier, why),
+                Ok(result) => result,
+            }
+        },
+    };
+    let session_for_merge = previous_session.clone();
+    // Use auth from previous session if no auth present
+    if let (true, Some(p)) = (auth.is_none(), previous_session) {
+        auth = p.auth;
+    }
+    let saved_auth = auth.clone();
+    // Merge headers from parameters and previous session
+    let (headers, headers_to_unset) = request_items.headers(session_for_merge.as_ref())?;
+    // Save the current session if present
+    if let Some(identifier) = args.session {
+        let new_session = Session::new(identifier, host, request_items.export_headers(session_for_merge.as_ref()), saved_auth);
+        if let Err(why) = new_session.save() {
+            panic!("couldn't save session {}: {}", new_session.identifier, why);
+        }
+    }
+      
     let redirect = match args.follow || args.download {
         true => Policy::limited(args.max_redirects.unwrap_or(10)),
         false => Policy::none(),
