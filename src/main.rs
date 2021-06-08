@@ -80,9 +80,15 @@ fn main() -> Result<i32> {
     };
 
     let mut client = Client::builder()
+        .use_rustls_tls()
         .http2_adaptive_window(true)
         .timeout(timeout)
         .redirect(redirect);
+
+    #[cfg(feature = "native-tls")]
+    if args.native_tls {
+        client = client.use_native_tls();
+    }
 
     let mut resume: Option<u64> = None;
 
