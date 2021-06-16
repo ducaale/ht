@@ -2702,6 +2702,7 @@ dependencies = [
  "syntect",
  "tempfile",
  "termcolor",
+ "url",
 ]
 
 [[package]]

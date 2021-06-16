@@ -4,6 +4,7 @@ use std::{
 };
 
 use reqwest::header::{HeaderMap, CONTENT_TYPE};
+use url::{Host, Url};
 
 /// Whether to make some things more deterministic for the benefit of tests
 pub fn test_mode() -> bool {
@@ -124,4 +125,8 @@ pub fn copy_largebuf(reader: &mut impl io::Read, writer: &mut impl Write) -> io:
 
 pub fn valid_json(text: &str) -> bool {
     serde_json::from_str::<serde::de::IgnoredAny>(text).is_ok()
+}
+
+pub(crate) fn requires_native_tls(url: &Url) -> bool {
+    url.scheme() == "https" && matches!(url.host(), Some(Host::Ipv4(..)) | Some(Host::Ipv6(..)))
 }
