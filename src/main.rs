@@ -4,6 +4,7 @@ mod cli;
 mod download;
 mod formatting;
 mod printer;
+mod redirect;
 mod request_items;
 mod session;
 mod to_curl;
@@ -22,7 +23,6 @@ use reqwest::blocking::Client;
 use reqwest::header::{
     HeaderValue, ACCEPT, ACCEPT_ENCODING, CONNECTION, CONTENT_TYPE, COOKIE, RANGE, USER_AGENT,
 };
-use reqwest::redirect::Policy;
 
 use crate::auth::{auth_from_netrc, parse_auth, read_netrc};
 use crate::buffer::Buffer;
@@ -77,16 +77,13 @@ fn main() -> Result<i32> {
 
     let method = args.method.unwrap_or_else(|| body.pick_method());
     let timeout = args.timeout.and_then(|t| t.as_duration());
-    let redirect = match args.follow {
-        true => Policy::limited(args.max_redirects.unwrap_or(10)),
-        false => Policy::none(),
-    };
 
     let mut client = Client::builder()
         .http2_adaptive_window(true)
-        .timeout(timeout)
-        .redirect(redirect);
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout);
 
+    let mut exit_code: i32 = 0;
     let mut resume: Option<u64> = None;
 
     if url.scheme() == "https" {
@@ -286,7 +283,7 @@ fn main() -> Result<i32> {
         atty::is(Stream::Stdout) || test_pretend_term(),
         args.pretty,
     )?;
-    let is_redirect = buffer.is_redirect();
+    let is_output_redirected = buffer.is_redirect();
     let print = match args.print {
         Some(print) => print,
         None => Print::new(
@@ -299,34 +296,48 @@ fn main() -> Result<i32> {
         ),
     };
     let pretty = args.pretty.unwrap_or_else(|| buffer.guess_pretty());
-    let mut printer = Printer::new(pretty, args.style, args.stream, buffer);
+    let mut printer = Printer::new(print.clone(), pretty, args.style, args.stream, buffer);
 
-    if print.request_headers {
-        printer.print_request_headers(&request)?;
-    }
-    if print.request_body {
-        printer.print_request_body(&mut request)?;
-    }
+    printer.print_request_headers(&request)?;
+    printer.print_request_body(&mut request)?;
 
-    let mut exit_code: i32 = 0;
     if !args.offline {
-        let response = client.execute(request)?;
-        let status = response.status();
-        let check_status = args.check_status.unwrap_or(!args.httpie_compat_mode);
-        exit_code = match status.as_u16() {
-            _ if !(check_status) => 0,
-            300..=399 if !args.follow => 3,
-            400..=499 => 4,
-            500..=599 => 5,
-            _ => 0,
+        let response = if args.follow {
+            let mut client =
+                redirect::RedirectFollower::new(&client, args.max_redirects.unwrap_or(10));
+            if let Some(history_print) = args.history_print {
+                printer.print = history_print;
+            }
+            if args.all {
+                client.on_redirect(|prev_response, next_request| {
+                    printer.print_response_headers(&prev_response)?;
+                    printer.print_response_body(prev_response)?;
+                    printer.print_seperator()?;
+                    printer.print_request_headers(next_request)?;
+                    printer.print_request_body(next_request)?;
+                    Ok(())
+                });
+            }
+            client.execute(request)?
+        } else {
+            client.execute(request)?
         };
-        if is_redirect && exit_code != 0 {
+
+        let status = response.status();
+        if args.check_status.unwrap_or(!args.httpie_compat_mode) {
+            exit_code = match status.as_u16() {
+                300..=399 if !args.follow => 3,
+                400..=499 => 4,
+                500..=599 => 5,
+                _ => 0,
+            }
+        }
+        if is_output_redirected && exit_code != 0 {
             eprintln!("\n{}: warning: HTTP {}\n", env!("CARGO_PKG_NAME"), status);
         }
 
-        if print.response_headers {
-            printer.print_response_headers(&response)?;
-        }
+        printer.print = print;
+        printer.print_response_headers(&response)?;
         if args.download {
             if exit_code == 0 {
                 download_file(
@@ -338,7 +349,7 @@ fn main() -> Result<i32> {
                     args.quiet,
                 )?;
             }
-        } else if print.response_body {
+        } else {
             printer.print_response_body(response)?;
         }
     }

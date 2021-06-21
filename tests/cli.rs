@@ -8,8 +8,8 @@ use std::{
 };
 
 use assert_cmd::prelude::*;
-use httpmock::{Method::*, MockServer};
-use indoc::indoc;
+use httpmock::{HttpMockRequest, Method::*, MockServer};
+use indoc::{formatdoc, indoc};
 use predicate::str::contains;
 use predicates::prelude::*;
 use serde_json::json;
@@ -247,6 +247,24 @@ fn download() {
         .assert();
     mock.assert();
     assert_eq!(read_to_string(&outfile).unwrap(), "file contents\n");
+}
+
+#[test]
+fn accept_encoding_not_modifiable_in_download_mode() {
+    let server = MockServer::start();
+    let mock = server.mock(|when, then| {
+        when.header("accept-encoding", "identity");
+        then.body(r#"{"ids":[1,2,3]}"#);
+    });
+
+    let dir = tempdir().unwrap();
+    get_command()
+        .current_dir(&dir)
+        .arg(server.base_url())
+        .arg("--download")
+        .arg("accept-encoding:gzip")
+        .assert();
+    mock.assert();
 }
 
 fn get_proxy_command(
@@ -1659,19 +1677,250 @@ fn cookies_override_each_other_in_the_correct_order() {
 }
 
 #[test]
-fn accept_encoding_not_modifiable_in_download_mode() {
-    let server = MockServer::start();
-    let mock = server.mock(|when, then| {
-        when.header("accept-encoding", "identity");
-        then.body(r#"{"ids":[1,2,3]}"#);
+fn print_intermediate_requests_and_responses() {
+    let server1 = MockServer::start();
+    let server2 = MockServer::start();
+    server1.mock(|_, then| {
+        then.header("location", &server2.base_url())
+            .status(302)
+            .header("date", "N/A")
+            .body("redirecting...");
+    });
+    server2.mock(|_, then| {
+        then.header("date", "N/A").body("final destination");
     });
 
-    let dir = tempdir().unwrap();
     get_command()
-        .current_dir(&dir)
-        .arg(server.base_url())
-        .arg("--download")
-        .arg("accept-encoding:gzip")
-        .assert();
-    mock.assert();
+        .arg(server1.base_url())
+        .arg("--follow")
+        .arg("--verbose")
+        .arg("--all")
+        .assert()
+        .stdout(formatdoc! {r#"
+            GET / HTTP/1.1
+            accept: */*
+            accept-encoding: gzip, br
+            connection: keep-alive
+            host: http.mock
+            user-agent: xh/0.0.0 (test mode)
+
+            HTTP/1.1 302 Found
+            content-length: 14
+            date: N/A
+            location: {url}
+
+            redirecting...
+
+            GET / HTTP/1.1
+            accept: */*
+            accept-encoding: gzip, br
+            connection: keep-alive
+            host: http.mock
+            user-agent: xh/0.0.0 (test mode)
+
+            HTTP/1.1 200 OK
+            content-length: 17
+            date: N/A
+
+            final destination
+        "#, url = server2.base_url() });
+}
+
+#[test]
+fn history_print() {
+    let server1 = MockServer::start();
+    let server2 = MockServer::start();
+    server1.mock(|_, then| {
+        then.header("location", &server2.base_url())
+            .status(302)
+            .header("date", "N/A")
+            .body("redirecting...");
+    });
+    server2.mock(|_, then| {
+        then.header("date", "N/A").body("final destination");
+    });
+
+    get_command()
+        .arg(server1.base_url())
+        .arg("--follow")
+        .arg("--print=HhBb")
+        .arg("--history-print=Hh")
+        .arg("--all")
+        .assert()
+        .stdout(formatdoc! {r#"
+            GET / HTTP/1.1
+            accept: */*
+            accept-encoding: gzip, br
+            connection: keep-alive
+            host: http.mock
+            user-agent: xh/0.0.0 (test mode)
+
+            HTTP/1.1 302 Found
+            content-length: 14
+            date: N/A
+            location: {url}
+
+
+            GET / HTTP/1.1
+            accept: */*
+            accept-encoding: gzip, br
+            connection: keep-alive
+            host: http.mock
+            user-agent: xh/0.0.0 (test mode)
+
+            HTTP/1.1 200 OK
+            content-length: 17
+            date: N/A
+
+            final destination
+        "#, url = server2.base_url() });
+}
+
+#[test]
+fn max_redirects_is_enforced() {
+    let server1 = MockServer::start();
+    let server2 = MockServer::start();
+    server1.mock(|_, then| {
+        then.header("location", &server2.base_url())
+            .status(302)
+            .body("redirecting...");
+    });
+    server2.mock(|_, then| {
+        then.header("location", &server2.base_url()) // redirect to the same server
+            .status(302)
+            .body("redirecting...");
+    });
+
+    get_command()
+        .arg(server1.base_url())
+        .arg("--follow")
+        .arg("--max-redirects=5")
+        .assert()
+        .stderr(predicate::str::contains(
+            "Too many redirects (--max-redirects=5)",
+        ))
+        .failure();
+}
+
+#[test]
+fn method_is_changed_when_following_302_redirect() {
+    let server1 = MockServer::start();
+    let server2 = MockServer::start();
+    let mock1 = server1.mock(|when, then| {
+        when.method(POST)
+            .header_exists("content-length")
+            .body(r#"{"name":"ali"}"#);
+        then.header("location", &server2.base_url())
+            .status(302)
+            .body("redirecting...");
+    });
+    let mock2 = server2.mock(|when, then| {
+        when.method(GET).matches(|req: &HttpMockRequest| {
+            !req.headers
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|(key, _)| key == "content-length")
+        });
+        then.body("final destination");
+    });
+
+    get_command()
+        .arg("post")
+        .arg(server1.base_url())
+        .arg("--follow")
+        .arg("name=ali")
+        .assert()
+        .success();
+
+    mock1.assert();
+    mock2.assert();
+}
+
+#[test]
+fn method_is_not_changed_when_following_307_redirect() {
+    let server1 = MockServer::start();
+    let server2 = MockServer::start();
+    let mock1 = server1.mock(|when, then| {
+        when.method(POST).body(r#"{"name":"ali"}"#);
+        then.header("location", &server2.base_url())
+            .status(307)
+            .body("redirecting...");
+    });
+    let mock2 = server2.mock(|when, then| {
+        when.method(POST).body(r#"{"name":"ali"}"#);
+        then.body("final destination");
+    });
+
+    get_command()
+        .arg("post")
+        .arg(server1.base_url())
+        .arg("--follow")
+        .arg("name=ali")
+        .assert()
+        .success();
+
+    mock1.assert();
+    mock2.assert();
+}
+
+#[test]
+fn sensitive_headers_are_removed_after_cross_domain_redirect() {
+    let server1 = MockServer::start();
+    let server2 = MockServer::start();
+    let mock1 = server1.mock(|when, then| {
+        when.header_exists("authorization").header_exists("hello");
+        then.header("location", &server2.base_url())
+            .status(302)
+            .body("redirecting...");
+    });
+    let mock2 = server2.mock(|when, then| {
+        when.header_exists("hello")
+            .matches(|req: &HttpMockRequest| {
+                !req.headers
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .any(|(key, _)| key == "authorization")
+            });
+        then.header("date", "N/A").body("final destination");
+    });
+
+    get_command()
+        .arg(server1.base_url())
+        .arg("--follow")
+        .arg("--auth=user:pass")
+        .arg("hello:world")
+        .assert()
+        .success();
+
+    mock1.assert();
+    mock2.assert();
+}
+
+#[test]
+fn request_body_is_buffered_for_307_redirect() {
+    let server1 = MockServer::start();
+    let server2 = MockServer::start();
+    server1.mock(|_, then| {
+        then.header("location", &server2.base_url())
+            .status(307)
+            .body("redirecting...");
+    });
+    let mock2 = server2.mock(|when, then| {
+        when.body("hello world\n");
+        then.body("final destination");
+    });
+
+    let mut file = tempfile::NamedTempFile::new().unwrap();
+    writeln!(file, "hello world").unwrap();
+
+    get_command()
+        .arg(server1.base_url())
+        .arg("--follow")
+        .arg(format!("@{}", file.path().to_string_lossy()))
+        .assert()
+        .success();
+
+    mock2.assert();
 }

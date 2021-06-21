@@ -2834,7 +2834,6 @@ dependencies = [
  "indoc",
  "jsonxf",
  "lazy_static",
- "memchr",
  "mime",
  "mime2ext",
  "mime_guess",
