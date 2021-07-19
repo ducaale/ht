@@ -1,3 +1,4 @@
+#![allow(clippy::bool_assert_comparison)]
 mod auth;
 mod buffer;
 mod cli;
@@ -199,7 +200,9 @@ fn main() -> Result<i32> {
             Body::File {
                 file_name,
                 file_type,
+                file_name_header,
             } => request_builder.body(File::open(file_name)?).header(
+                // TODO: alter content-disposition
                 CONTENT_TYPE,
                 file_type.unwrap_or_else(|| HeaderValue::from_static(JSON_CONTENT_TYPE)),
             ),
